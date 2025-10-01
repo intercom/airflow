@@ -830,7 +830,10 @@ class Airflow(AirflowBaseView):
             if arg_tags_filter:
                 dags_query = dags_query.where(DagModel.tags.any(DagTag.name.in_(arg_tags_filter)))
 
-            dags_query = dags_query.where(DagModel.dag_id.in_(filter_dag_ids))
+            has_role_named_admin = any(role.name == "Admin" for role in g.user.roles)
+            if not has_role_named_admin:
+                dags_query = dags_query.where(DagModel.dag_id.in_(filter_dag_ids))
+
             filtered_dag_count = get_query_count(dags_query, session=session)
             if filtered_dag_count == 0 and len(arg_tags_filter):
                 flash(
@@ -844,15 +847,17 @@ class Airflow(AirflowBaseView):
             running_dags = dags_query.join(DagRun, DagModel.dag_id == DagRun.dag_id).where(
                 (DagRun.state == DagRunState.RUNNING) | (DagRun.state == DagRunState.QUEUED)
             )
+            lastrun_running_count_active = 0
+            lastrun_running_count_paused = 0
+            if arg_status_filter is not None:
+                lastrun_running_is_paused = session.execute(
+                    running_dags.with_only_columns(DagModel.dag_id, DagModel.is_paused).distinct(DagModel.dag_id)
+                ).all()
 
-            lastrun_running_is_paused = session.execute(
-                running_dags.with_only_columns(DagModel.dag_id, DagModel.is_paused).distinct(DagModel.dag_id)
-            ).all()
-
-            lastrun_running_count_active = len(
-                list(filter(lambda x: not x.is_paused, lastrun_running_is_paused))
-            )
-            lastrun_running_count_paused = len(list(filter(lambda x: x.is_paused, lastrun_running_is_paused)))
+                lastrun_running_count_active = len(
+                    list(filter(lambda x: not x.is_paused, lastrun_running_is_paused))
+                )
+                lastrun_running_count_paused = len(list(filter(lambda x: x.is_paused, lastrun_running_is_paused)))
 
             # find DAGs for which the latest DagRun is FAILED
             subq_all = (
@@ -879,16 +884,19 @@ class Airflow(AirflowBaseView):
             )
             failed_dags = dags_query.join(subq_join, DagModel.dag_id == subq_join.c.dag_id)
 
-            lastrun_failed_is_paused_count = dict(
-                session.execute(
-                    failed_dags.with_only_columns(DagModel.is_paused, func.count()).group_by(
-                        DagModel.is_paused
-                    )
-                ).all()
-            )
+            lastrun_failed_count_active = 0
+            lastrun_failed_count_paused = 0
+            if arg_status_filter is not None:
+                lastrun_failed_is_paused_count = dict(
+                    session.execute(
+                        failed_dags.with_only_columns(DagModel.is_paused, func.count()).group_by(
+                            DagModel.is_paused
+                        )
+                    ).all()
+                )
 
-            lastrun_failed_count_active = lastrun_failed_is_paused_count.get(False, 0)
-            lastrun_failed_count_paused = lastrun_failed_is_paused_count.get(True, 0)
+                lastrun_failed_count_active = lastrun_failed_is_paused_count.get(False, 0)
+                lastrun_failed_count_paused = lastrun_failed_is_paused_count.get(True, 0)
 
             if arg_lastrun_filter == "running":
                 dags_query = running_dags
